@@ -1,0 +1,30 @@
+# Node/Frontend
+frontend/node_modules/
+frontend/dist/
+frontend/.env
+frontend/.env.*
+frontend/*.log
+frontend/npm-debug.log*
+frontend/yarn-debug.log*
+frontend/yarn-error.log*
+frontend/.vscode/
+
+# Python/Backend
+backend/__pycache__/
+backend/*.py[cod]
+backend/*$py.class
+backend/.env
+backend/venv/
+backend/env/
+backend/chroma_store/
+backend/*.log
+
+# OS Files
+.DS_Store
+Thumbs.db
+
+# Other
+.idea/
+.vscode/
+*.swp
+*.bak

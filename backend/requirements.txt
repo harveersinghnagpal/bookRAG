@@ -1,0 +1,16 @@
+fastapi
+uvicorn[standard]
+langchain
+langchain-groq
+langchain-huggingface
+langchain-text-splitters
+sentence-transformers
+faiss-cpu
+rank-bm25
+pymupdf
+python-docx
+ebooklib
+beautifulsoup4
+python-dotenv
+python-multipart
+numpy
