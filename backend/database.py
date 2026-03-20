@@ -13,11 +13,27 @@ from sqlalchemy import (
 from sqlalchemy.orm import declarative_base, sessionmaker, relationship
 from config import settings
 
+import logging
 # ---------------------------------------------------------------------------
 # Engine — supports SQLite (local) and PostgreSQL (Render)
 # ---------------------------------------------------------------------------
-_connect_args = {"check_same_thread": False} if settings.DATABASE_URL.startswith("sqlite") else {}
-engine = create_engine(settings.DATABASE_URL, connect_args=_connect_args)
+logger = logging.getLogger("bookrag.database")
+
+_connect_args = {}
+if settings.DATABASE_URL.startswith("sqlite"):
+    _connect_args["check_same_thread"] = False
+else:
+    # PostgreSQL optimizations for production (timeout prevents hanging)
+    _connect_args = {
+        "connect_timeout": 10,
+        "keepalives": 1,
+        "keepalives_idle": 30,
+        "keepalives_interval": 10,
+        "keepalives_count": 5,
+    }
+
+logger.info(f"Creating engine for {settings.DATABASE_URL.split('@')[-1] if '@' in settings.DATABASE_URL else 'local db'}")
+engine = create_engine(settings.DATABASE_URL, connect_args=_connect_args, pool_pre_ping=True)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 

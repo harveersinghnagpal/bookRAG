@@ -67,8 +67,16 @@ jobs: Dict[str, Dict[str, Any]] = {}
 @asynccontextmanager
 async def lifespan(app):
     """Create DB tables, purge stale book records, warm up embedding model."""
-    create_tables()
-    logger.info("✓ Database tables ready.")
+    logger.info("Initializing application startup...")
+    
+    try:
+        logger.info("Connecting to database and creating tables...")
+        create_tables()
+        logger.info("✓ Database tables ready.")
+    except Exception as e:
+        logger.error(f"❌ DATABASE STARTUP FAILED: {e}", exc_info=True)
+        # We don't raise here so the app can still bind to the port for health checks
+        # but most routes will fail later.
 
     # Purge book records whose FAISS index no longer exists on disk
     # (happens after every free-tier restart since /tmp is wiped)
