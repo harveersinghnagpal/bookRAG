@@ -19,6 +19,10 @@ services:
     plan: free
     healthCheckPath: /health
     envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.8
+      - key: PYTHONUNBUFFERED
+        value: 1
       - key: GROQ_API_KEY
         sync: false               # Set manually in Dashboard -> Environment
       - key: DATABASE_URL

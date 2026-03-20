@@ -33,10 +33,11 @@ os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 PERSIST_DIR = settings.PERSIST_DIR
 os.makedirs(PERSIST_DIR, exist_ok=True)
 
-# ---------------------------------------------------------------------------
-# Embedding model (local, free — no API key needed)
-# ---------------------------------------------------------------------------
-embeddings_model = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
+from functools import lru_cache
+
+@lru_cache(maxsize=1)
+def get_embeddings_model():
+    return HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
 
 
 # ---------------------------------------------------------------------------
@@ -277,9 +278,11 @@ def ingest_book(
     all_vectors: List[List[float]] = []
     batch_size = 50
 
+    model = get_embeddings_model()
+
     for i in range(0, total_chunks, batch_size):
         batch = texts[i : i + batch_size]
-        all_vectors.extend(embeddings_model.embed_documents(batch))
+        all_vectors.extend(model.embed_documents(batch))
         done = min(i + batch_size, total_chunks)
         if progress_callback:
             progress_callback(done, total_chunks, f"Embedding {done}/{total_chunks} chunks…")

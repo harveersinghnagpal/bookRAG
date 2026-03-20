@@ -39,7 +39,7 @@ from slowapi.errors import RateLimitExceeded
 from config import settings
 from database import create_tables, get_db, User, Book, SessionLocal
 from auth import hash_password, verify_password, create_access_token, get_current_user
-from ingestion import ingest_book, embeddings_model
+from ingestion import ingest_book, get_embeddings_model
 from retriever import retrieve_chunks
 from chat import generate_answer
 
@@ -80,23 +80,27 @@ async def lifespan(app):
 
     # Purge book records whose FAISS index no longer exists on disk
     # (happens after every free-tier restart since /tmp is wiped)
-    db = SessionLocal()
     try:
-        stale = [
-            b for b in db.query(Book).all()
-            if not os.path.isfile(os.path.join(settings.PERSIST_DIR, b.collection_id, "index.faiss"))
-        ]
-        if stale:
-            for b in stale:
-                db.delete(b)
-            db.commit()
-            logger.info(f"Cleaned up {len(stale)} stale book record(s) (vector store was reset).")
-    finally:
-        db.close()
+        db = SessionLocal()
+        try:
+            stale = [
+                b for b in db.query(Book).all()
+                if not os.path.isfile(os.path.join(settings.PERSIST_DIR, b.collection_id, "index.faiss"))
+            ]
+            if stale:
+                for b in stale:
+                    db.delete(b)
+                db.commit()
+                logger.info(f"Cleaned up {len(stale)} stale book record(s) (vector store was reset).")
+        finally:
+            db.close()
+    except Exception as e:
+        logger.error(f"Failed to clean up stale books: {e}", exc_info=True)
 
     async def _warm():
         try:
-            await run_in_threadpool(embeddings_model.embed_query, "warmup")
+            model = get_embeddings_model()
+            await run_in_threadpool(model.embed_query, "warmup")
             logger.info("✓ Embedding model ready.")
         except Exception as e:
             logger.warning(f"Warmup warning: {e}")

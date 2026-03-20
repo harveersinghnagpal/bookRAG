@@ -29,7 +29,6 @@ PERSIST_DIR = settings.PERSIST_DIR
 # ---------------------------------------------------------------------------
 # Module-level singletons — loaded once at import / server startup
 # ---------------------------------------------------------------------------
-embeddings_model = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
 
 reranker = CrossEncoder(
     "cross-encoder/ms-marco-MiniLM-L-6-v2",
@@ -99,8 +98,9 @@ def retrieve_chunks(
     # ------------------------------------------------------------------
     # Stage 1 — FAISS semantic search
     # ------------------------------------------------------------------
+    model = get_embeddings_model()
     query_vec = np.array(
-        [embeddings_model.embed_query(query)], dtype="float32"
+        [model.embed_query(query)], dtype="float32"
     )
     faiss.normalize_L2(query_vec)
 
