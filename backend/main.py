@@ -1,57 +1,82 @@
 """
 main.py — FastAPI server for the BookRAG chatbot.
 
-Endpoints:
-    POST /upload           — Starts ingestion in background, returns job_id
-    GET  /progress/{job_id}— Poll for ingestion progress (0-100%)
-    POST /chat             — Ask a question about an uploaded book
-    GET  /health           — Health check
+Auth endpoints (public):
+    POST /auth/register    — create account → { access_token, user }
+    POST /auth/login       — sign in        → { access_token, user }
+    GET  /auth/me          — current user   (protected)
+
+Book endpoints (all protected — require Bearer token):
+    POST /upload           — start ingestion in background, return job_id
+    GET  /progress/{job_id}— poll ingestion progress (0-100%)
+    GET  /books            — list current user's ingested books
+    POST /chat             — ask a question about an uploaded book
+
+Utility:
+    GET  /health           — liveness probe
 """
 
 import os
 import shutil
 import tempfile
 import uuid
+import logging
 from pathlib import Path
 from contextlib import asynccontextmanager
+from typing import Dict, Any
 
-from fastapi import FastAPI, UploadFile, File, HTTPException, BackgroundTasks
+import asyncio
+from fastapi import FastAPI, UploadFile, File, HTTPException, BackgroundTasks, Request, Depends, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.concurrency import run_in_threadpool
-from pydantic import BaseModel
-from dotenv import load_dotenv
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel, EmailStr
+from sqlalchemy.orm import Session
 
-load_dotenv()
-
+from config import settings
+from database import create_tables, get_db, User, Book, SessionLocal
+from auth import hash_password, verify_password, create_access_token, get_current_user
 from ingestion import ingest_book, embeddings_model
 from retriever import retrieve_chunks
 from chat import generate_answer
 
-# --------------------------------------------------------------------------
-# In-memory job store: job_id -> { status, progress, message, result, error }
-# --------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Logging
+# ---------------------------------------------------------------------------
+logging.basicConfig(
+    level=getattr(logging, settings.LOG_LEVEL.upper(), logging.INFO),
+    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+)
+logger = logging.getLogger("bookrag")
+
+# ---------------------------------------------------------------------------
+# In-memory job store { job_id → {status, progress, message, result, error} }
+# NOTE: Replace with Redis for multi-worker deployments.
+# ---------------------------------------------------------------------------
 jobs: Dict[str, Dict[str, Any]] = {}
 
 
-import asyncio
-
 @asynccontextmanager
 async def lifespan(app):
-    """Fire-and-forget model warmup — server starts instantly."""
+    """Create DB tables and warm up the embedding model on startup."""
+    create_tables()
+    logger.info("✓ Database tables ready.")
+
     async def _warm():
         try:
             await run_in_threadpool(embeddings_model.embed_query, "warmup")
-            print("\u2713 Embedding model ready.")
+            logger.info("✓ Embedding model ready.")
         except Exception as e:
-            print(f"Warmup warning: {e}")
+            logger.warning(f"Warmup warning: {e}")
     asyncio.create_task(_warm())
     yield
 
-app = FastAPI(title="BookRAG API", version="1.0.0", lifespan=lifespan)
+
+app = FastAPI(title="BookRAG API", version="2.0.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000", "http://localhost:5173"],
+    allow_origins=settings.allowed_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -60,9 +85,28 @@ app.add_middleware(
 ALLOWED_EXTENSIONS = {".pdf", ".docx", ".epub", ".txt", ".html", ".htm"}
 
 
-# --------------------------------------------------------------------------
+@app.exception_handler(Exception)
+async def global_exception_handler(request: Request, exc: Exception):
+    logger.error(f"Unhandled error on {request.url}: {exc}", exc_info=True)
+    return JSONResponse(status_code=500, content={"detail": "Internal server error"})
+
+
+# ---------------------------------------------------------------------------
 # Schemas
-# --------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+
+class RegisterRequest(BaseModel):
+    email: str
+    password: str
+
+class LoginRequest(BaseModel):
+    email: str
+    password: str
+
+class AuthResponse(BaseModel):
+    access_token: str
+    token_type: str = "bearer"
+    user: Dict[str, Any]
 
 class ChatRequest(BaseModel):
     question: str
@@ -77,30 +121,90 @@ class UploadStartResponse(BaseModel):
     message: str
 
 
-# --------------------------------------------------------------------------
-# Background ingestion worker
-# --------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Auth routes  (public)
+# ---------------------------------------------------------------------------
 
-def _run_ingestion(job_id: str, tmp_path: str, filename: str, tmp_dir: str):
-    """Run in a thread pool. Updates jobs[job_id] with progress."""
+@app.post("/auth/register", response_model=AuthResponse, status_code=201)
+async def register(req: RegisterRequest, db: Session = Depends(get_db)):
+    if db.query(User).filter(User.email == req.email).first():
+        raise HTTPException(status_code=400, detail="Email already registered.")
+    if len(req.password) < 6:
+        raise HTTPException(status_code=400, detail="Password must be at least 6 characters.")
+
+    user = User(email=req.email, hashed_password=hash_password(req.password))
+    db.add(user)
+    db.commit()
+    db.refresh(user)
+    logger.info(f"New user registered: {user.email}")
+
+    token = create_access_token(user.id, user.email)
+    return AuthResponse(
+        access_token=token,
+        user={"id": user.id, "email": user.email},
+    )
+
+
+@app.post("/auth/login", response_model=AuthResponse)
+async def login(req: LoginRequest, db: Session = Depends(get_db)):
+    user = db.query(User).filter(User.email == req.email).first()
+    if not user or not verify_password(req.password, user.hashed_password):
+        raise HTTPException(status_code=401, detail="Invalid email or password.")
+
+    token = create_access_token(user.id, user.email)
+    logger.info(f"User logged in: {user.email}")
+    return AuthResponse(
+        access_token=token,
+        user={"id": user.id, "email": user.email},
+    )
+
+
+@app.get("/auth/me")
+async def me(current_user: User = Depends(get_current_user)):
+    return {"id": current_user.id, "email": current_user.email}
+
+
+# ---------------------------------------------------------------------------
+# Background ingestion worker
+# ---------------------------------------------------------------------------
+
+def _run_ingestion(job_id: str, tmp_path: str, filename: str, tmp_dir: str, user_id: int):
+    """Runs in a thread pool. Updates jobs[job_id] and persists to DB on success."""
     try:
         jobs[job_id]["status"] = "running"
         jobs[job_id]["message"] = "Parsing file…"
         jobs[job_id]["progress"] = 5
+        logger.info(f"Job {job_id}: ingesting '{filename}' for user {user_id}")
 
         def progress_cb(current: int, total: int, msg: str = ""):
             pct = 5 + int((current / total) * 90) if total > 0 else 5
             jobs[job_id]["progress"] = pct
             jobs[job_id]["message"] = msg or f"Embedding chunk {current}/{total}…"
 
-        result = ingest_book(tmp_path, filename, progress_callback=progress_cb)
+        result = ingest_book(tmp_path, filename, progress_callback=progress_cb, user_id=user_id)
+
+        # Persist book metadata to DB (create session inside the thread)
+        db = SessionLocal()
+        try:
+            if not db.query(Book).filter(Book.collection_id == result["collection_id"]).first():
+                db.add(Book(
+                    collection_id=result["collection_id"],
+                    book_title=result["book_title"],
+                    chunk_count=result["chunk_count"],
+                    owner_id=user_id,
+                ))
+                db.commit()
+        finally:
+            db.close()
 
         jobs[job_id]["status"] = "done"
         jobs[job_id]["progress"] = 100
         jobs[job_id]["message"] = "Complete!"
         jobs[job_id]["result"] = result
+        logger.info(f"Job {job_id}: done — {result['chunk_count']} chunks")
 
     except Exception as e:
+        logger.error(f"Job {job_id} failed: {e}", exc_info=True)
         jobs[job_id]["status"] = "error"
         jobs[job_id]["message"] = str(e)
         jobs[job_id]["error"] = str(e)
@@ -108,13 +212,24 @@ def _run_ingestion(job_id: str, tmp_path: str, filename: str, tmp_dir: str):
         shutil.rmtree(tmp_dir, ignore_errors=True)
 
 
-# --------------------------------------------------------------------------
-# Routes
-# --------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Protected routes
+# ---------------------------------------------------------------------------
 
 @app.post("/upload", response_model=UploadStartResponse)
-async def upload_book(background_tasks: BackgroundTasks, file: UploadFile = File(...)):
-    """Save file, kick off background ingestion, return job_id immediately."""
+async def upload_book(
+    request: Request,
+    background_tasks: BackgroundTasks,
+    file: UploadFile = File(...),
+    current_user: User = Depends(get_current_user),
+):
+    content_length = request.headers.get("content-length")
+    if content_length and int(content_length) > settings.MAX_UPLOAD_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail=f"File too large. Max {settings.MAX_UPLOAD_BYTES // (1024*1024)} MB.",
+        )
+
     ext = Path(file.filename).suffix.lower()
     if ext not in ALLOWED_EXTENSIONS:
         raise HTTPException(
@@ -129,28 +244,63 @@ async def upload_book(background_tasks: BackgroundTasks, file: UploadFile = File
 
     job_id = str(uuid.uuid4())
     jobs[job_id] = {"status": "queued", "progress": 0, "message": "Queued…", "result": None}
+    logger.info(f"Job {job_id}: queued for user {current_user.id} — '{file.filename}'")
 
-    # Pass _run_ingestion directly — Starlette runs sync background tasks in a thread pool
-    background_tasks.add_task(_run_ingestion, job_id, tmp_path, file.filename, tmp_dir)
-
+    background_tasks.add_task(
+        _run_ingestion, job_id, tmp_path, file.filename, tmp_dir, current_user.id
+    )
     return UploadStartResponse(job_id=job_id, message="Ingestion started")
 
 
 @app.get("/progress/{job_id}")
-async def get_progress(job_id: str):
-    """Poll for ingestion progress."""
+async def get_progress(job_id: str, current_user: User = Depends(get_current_user)):
     job = jobs.get(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
     return job
 
 
+@app.get("/books")
+async def list_books(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Return all books belonging to the authenticated user."""
+    books = db.query(Book).filter(Book.owner_id == current_user.id).all()
+    return {
+        "books": [
+            {
+                "collection_id": b.collection_id,
+                "book_title": b.book_title,
+                "chunk_count": b.chunk_count,
+                "created_at": b.created_at.isoformat() if b.created_at else None,
+            }
+            for b in books
+        ]
+    }
+
+
 @app.post("/chat", response_model=ChatResponse)
-async def chat_with_book(req: ChatRequest):
-    """Retrieve chunks and generate an LLM answer."""
+async def chat_with_book(
+    req: ChatRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    # Security: verify the collection belongs to this user
+    book = db.query(Book).filter(
+        Book.collection_id == req.collection_id,
+        Book.owner_id == current_user.id,
+    ).first()
+    if not book:
+        raise HTTPException(
+            status_code=403,
+            detail="Book not found or you don't have access to it.",
+        )
+
+    logger.info(f"Chat: user {current_user.id} — '{req.question[:60]}' on '{req.collection_id}'")
     try:
         chunks = await run_in_threadpool(retrieve_chunks, req.question, req.collection_id)
-    except Exception as e:
+    except Exception:
         raise HTTPException(
             status_code=404,
             detail=f"Collection '{req.collection_id}' not found. Upload the book first.",
@@ -168,4 +318,4 @@ async def chat_with_book(req: ChatRequest):
 
 @app.get("/health")
 async def health():
-    return {"status": "ok"}
+    return {"status": "ok", "model": settings.GROQ_MODEL, "version": "2.0.0"}

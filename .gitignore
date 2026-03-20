@@ -14,10 +14,13 @@ backend/__pycache__/
 backend/*.py[cod]
 backend/*$py.class
 backend/.env
+backend/.env.*
 backend/venv/
 backend/env/
 backend/chroma_store/
 backend/*.log
+backend/.pytest_cache/
+backend/bookrag.db
 
 # OS Files
 .DS_Store

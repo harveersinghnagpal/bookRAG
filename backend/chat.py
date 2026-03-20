@@ -9,9 +9,8 @@ from typing import List, Dict, Any
 
 from langchain_groq import ChatGroq
 from langchain_core.messages import SystemMessage, HumanMessage
-from dotenv import load_dotenv
 
-load_dotenv()
+from config import settings
 
 SYSTEM_PROMPT_TEMPLATE = """You are a precise, citation-driven assistant for the book: "{book_title}".
 Your ONLY knowledge source is the [CONTEXT PASSAGES] below, retrieved from this book.
@@ -42,13 +41,11 @@ _llm = None
 def _get_llm():
     global _llm
     if _llm is None:
-        api_key = os.getenv("GROQ_API_KEY")
-        if not api_key:
-            raise ValueError(
-                "GROQ_API_KEY is not set. Get a free key at https://console.groq.com/keys "
-                "and add it to backend/.env as: GROQ_API_KEY=gsk_..."
-            )
-        _llm = ChatGroq(model="llama-3.3-70b-versatile", temperature=0, api_key=api_key)
+        _llm = ChatGroq(
+            model=settings.GROQ_MODEL,
+            temperature=0,
+            api_key=settings.GROQ_API_KEY,
+        )
     return _llm
 
 

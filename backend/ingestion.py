@@ -23,15 +23,14 @@ from ebooklib import epub
 from bs4 import BeautifulSoup
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_huggingface import HuggingFaceEmbeddings
-from dotenv import load_dotenv
 
-load_dotenv()
+from config import settings
 
 # Suppress noisy third-party warnings
 os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")
 os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 
-PERSIST_DIR = os.getenv("CHROMA_PERSIST_DIR", "./chroma_store")
+PERSIST_DIR = settings.PERSIST_DIR
 os.makedirs(PERSIST_DIR, exist_ok=True)
 
 # ---------------------------------------------------------------------------
@@ -212,6 +211,7 @@ def ingest_book(
     file_path: str,
     original_filename: str,
     progress_callback: Optional[Callable[[int, int, str], None]] = None,
+    user_id: Optional[int] = None,
 ) -> Dict[str, Any]:
     """
     Full ingestion pipeline:
@@ -229,7 +229,9 @@ def ingest_book(
         raise ValueError(f"Unsupported file format: {ext}")
 
     book_title = Path(original_filename).stem
-    collection_name = _sanitize_collection_name(book_title)
+    base_slug = _sanitize_collection_name(book_title)
+    # Prefix with user_id so each user gets isolated collections in the store
+    collection_name = f"u{user_id}_{base_slug}" if user_id is not None else base_slug
 
     # Dedup: return immediately if all indices already exist
     if _collection_exists(collection_name):

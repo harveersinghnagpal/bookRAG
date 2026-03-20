@@ -21,11 +21,10 @@ import faiss
 from rank_bm25 import BM25Okapi
 from sentence_transformers import CrossEncoder
 from langchain_huggingface import HuggingFaceEmbeddings
-from dotenv import load_dotenv
 
-load_dotenv()
+from config import settings
 
-PERSIST_DIR = os.getenv("CHROMA_PERSIST_DIR", "./chroma_store")
+PERSIST_DIR = settings.PERSIST_DIR
 
 # ---------------------------------------------------------------------------
 # Module-level singletons — loaded once at import / server startup

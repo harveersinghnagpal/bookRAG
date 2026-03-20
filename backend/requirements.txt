@@ -14,3 +14,9 @@ beautifulsoup4
 python-dotenv
 python-multipart
 numpy
+# Auth
+python-jose[cryptography]
+passlib[bcrypt]
+# Database
+sqlalchemy
+psycopg2-binary
