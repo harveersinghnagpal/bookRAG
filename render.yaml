@@ -21,6 +21,8 @@ services:
     envVars:
       - key: GROQ_API_KEY
         sync: false               # Set manually in Dashboard -> Environment
+      - key: DATABASE_URL
+        sync: false               # Paste the Supabase connection string here
       - key: SECRET_KEY
         generateValue: true
       - key: CHROMA_PERSIST_DIR
