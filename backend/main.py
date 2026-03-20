@@ -66,9 +66,25 @@ jobs: Dict[str, Dict[str, Any]] = {}
 
 @asynccontextmanager
 async def lifespan(app):
-    """Create DB tables and warm up the embedding model on startup."""
+    """Create DB tables, purge stale book records, warm up embedding model."""
     create_tables()
     logger.info("✓ Database tables ready.")
+
+    # Purge book records whose FAISS index no longer exists on disk
+    # (happens after every free-tier restart since /tmp is wiped)
+    db = SessionLocal()
+    try:
+        stale = [
+            b for b in db.query(Book).all()
+            if not os.path.isfile(os.path.join(settings.PERSIST_DIR, b.collection_id, "index.faiss"))
+        ]
+        if stale:
+            for b in stale:
+                db.delete(b)
+            db.commit()
+            logger.info(f"Cleaned up {len(stale)} stale book record(s) (vector store was reset).")
+    finally:
+        db.close()
 
     async def _warm():
         try:
