@@ -1,15 +1,14 @@
 # render.yaml — Render Blueprint for BookRAG
-# Deploy: push this file to your GitHub repo, then:
-#   Render Dashboard → New → Blueprint → connect your repo
+# Deploy: go to Render Dashboard → New → Blueprint → connect your GitHub repo.
+# Render will detect this file automatically.
 #
-# IMPORTANT: After first deploy, manually set GROQ_API_KEY
-# in the Render dashboard under bookrag-backend → Environment.
+# AFTER FIRST DEPLOY: set GROQ_API_KEY manually (see comment on line 21).
 
 services:
   # ── FastAPI Backend ──────────────────────────────────────────────────────────
   - type: web
     name: bookrag-backend
-    runtime: python
+    env: python                   # ← must be "env:", NOT "runtime:"
     rootDir: backend
     buildCommand: pip install --upgrade pip && pip install -r requirements.txt
     startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
@@ -17,9 +16,9 @@ services:
     healthCheckPath: /health
     envVars:
       - key: GROQ_API_KEY
-        sync: false               # Set manually in Render dashboard (keep it secret)
+        sync: false               # Set this manually: Dashboard → bookrag-backend → Environment → Add Env Var
       - key: SECRET_KEY
-        generateValue: true       # Render auto-generates a strong random key
+        generateValue: true       # Render auto-generates a cryptographically strong value
       - key: DATABASE_URL
         fromDatabase:
           name: bookrag-db
@@ -27,7 +26,7 @@ services:
       - key: CHROMA_PERSIST_DIR
         value: /data/chroma_store
       - key: ALLOWED_ORIGINS
-        value: https://bookrag-frontend.onrender.com  # update after frontend deploys
+        value: https://bookrag-frontend.onrender.com
       - key: LOG_LEVEL
         value: info
       - key: GROQ_MODEL
@@ -35,26 +34,25 @@ services:
     disk:
       name: bookrag-vectors
       mountPath: /data/chroma_store
-      sizeGB: 1                   # upgrade if you plan to store many large books
+      sizeGB: 1
 
   # ── React Frontend (static site) ─────────────────────────────────────────────
   - type: web
     name: bookrag-frontend
-    runtime: static
+    env: static                   # ← must be "env:", NOT "runtime:"
     rootDir: frontend
     buildCommand: npm install && npm run build
     staticPublishPath: dist
     envVars:
       - key: VITE_API_URL
-        value: https://bookrag-backend.onrender.com  # update with your backend URL
+        value: https://bookrag-backend.onrender.com
     routes:
       - type: rewrite
         source: /*
-        destination: /index.html  # SPA fallback so React Router works
+        destination: /index.html  # SPA fallback
 
 # ── PostgreSQL Database ───────────────────────────────────────────────────────
 databases:
   - name: bookrag-db
-    plan: free
     databaseName: bookrag
     user: bookrag_user

@@ -30,8 +30,11 @@ from fastapi import FastAPI, UploadFile, File, HTTPException, BackgroundTasks, R
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, EmailStr
+from pydantic import BaseModel
 from sqlalchemy.orm import Session
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.util import get_remote_address
+from slowapi.errors import RateLimitExceeded
 
 from config import settings
 from database import create_tables, get_db, User, Book, SessionLocal
@@ -48,6 +51,11 @@ logging.basicConfig(
     format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
 )
 logger = logging.getLogger("bookrag")
+
+# ---------------------------------------------------------------------------
+# Rate limiter (IP-based, no Redis needed — in-memory)
+# ---------------------------------------------------------------------------
+limiter = Limiter(key_func=get_remote_address)
 
 # ---------------------------------------------------------------------------
 # In-memory job store { job_id → {status, progress, message, result, error} }
@@ -73,6 +81,10 @@ async def lifespan(app):
 
 
 app = FastAPI(title="BookRAG API", version="2.0.0", lifespan=lifespan)
+
+# Rate-limit error handler
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 app.add_middleware(
     CORSMiddleware,
@@ -126,7 +138,8 @@ class UploadStartResponse(BaseModel):
 # ---------------------------------------------------------------------------
 
 @app.post("/auth/register", response_model=AuthResponse, status_code=201)
-async def register(req: RegisterRequest, db: Session = Depends(get_db)):
+@limiter.limit("5/minute")          # max 5 sign-up attempts per IP per minute
+async def register(request: Request, req: RegisterRequest, db: Session = Depends(get_db)):
     if db.query(User).filter(User.email == req.email).first():
         raise HTTPException(status_code=400, detail="Email already registered.")
     if len(req.password) < 6:
@@ -146,7 +159,8 @@ async def register(req: RegisterRequest, db: Session = Depends(get_db)):
 
 
 @app.post("/auth/login", response_model=AuthResponse)
-async def login(req: LoginRequest, db: Session = Depends(get_db)):
+@limiter.limit("10/minute")         # brute-force guard: 10 attempts per IP per minute
+async def login(request: Request, req: LoginRequest, db: Session = Depends(get_db)):
     user = db.query(User).filter(User.email == req.email).first()
     if not user or not verify_password(req.password, user.hashed_password):
         raise HTTPException(status_code=401, detail="Invalid email or password.")
@@ -160,7 +174,8 @@ async def login(req: LoginRequest, db: Session = Depends(get_db)):
 
 
 @app.get("/auth/me")
-async def me(current_user: User = Depends(get_current_user)):
+@limiter.limit("60/minute")
+async def me(request: Request, current_user: User = Depends(get_current_user)):
     return {"id": current_user.id, "email": current_user.email}
 
 
@@ -217,6 +232,7 @@ def _run_ingestion(job_id: str, tmp_path: str, filename: str, tmp_dir: str, user
 # ---------------------------------------------------------------------------
 
 @app.post("/upload", response_model=UploadStartResponse)
+@limiter.limit("10/hour")           # heavy operation — 10 uploads per IP per hour
 async def upload_book(
     request: Request,
     background_tasks: BackgroundTasks,
@@ -253,7 +269,8 @@ async def upload_book(
 
 
 @app.get("/progress/{job_id}")
-async def get_progress(job_id: str, current_user: User = Depends(get_current_user)):
+@limiter.limit("120/minute")        # polling — generous limit
+async def get_progress(request: Request, job_id: str, current_user: User = Depends(get_current_user)):
     job = jobs.get(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
@@ -261,7 +278,9 @@ async def get_progress(job_id: str, current_user: User = Depends(get_current_use
 
 
 @app.get("/books")
+@limiter.limit("60/minute")
 async def list_books(
+    request: Request,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
@@ -281,7 +300,9 @@ async def list_books(
 
 
 @app.post("/chat", response_model=ChatResponse)
+@limiter.limit("30/minute")         # 30 questions per IP per minute
 async def chat_with_book(
+    request: Request,
     req: ChatRequest,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),

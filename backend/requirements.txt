@@ -20,3 +20,5 @@ passlib[bcrypt]
 # Database
 sqlalchemy
 psycopg2-binary
+# Rate limiting
+slowapi
